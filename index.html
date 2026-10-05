@@ -159,6 +159,10 @@ textarea,input{font-family:inherit}
 .pi-pie{text-align:center;font-size:11px;margin-top:6px}
 .pi-cliente.pi-corte{margin-top:16px;border-top:2px dashed #000;padding-top:16px}
 @page{margin:0}
+.solo-impresion{display:none}
+.est-bar{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;padding:10px 12px;border-radius:10px;margin-bottom:12px;font-size:13px;border:1px solid #DDD;background:#fff}
+.est-bar.on{background:#EEF7F1;border-color:#9CCFB0;color:#1F5C38;font-weight:600}
+.est-bar button{padding:7px 12px;border-radius:8px;border:1px solid #CCC;background:#fff;font-size:12px;font-weight:600;cursor:pointer}
 @media print{
   html,body{background:#fff!important;margin:0!important;padding:0!important}
   #nav,#app,#modal-almuerzo,#toast,.pi-head,.pi-btn{display:none!important}
@@ -205,6 +209,8 @@ textarea,input{font-family:inherit}
 </div>
 <div id="toast"></div>
 
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script>
 <script>
 // ── CONFIGURACIÓN ──────────────────────────────────────
 var MESEROS = ['Mesero 1','Mesero 2','Mesero 3','Mesero 4'];
@@ -301,13 +307,25 @@ var INV0 = {
   pan:          {n:'Pan',                 u:'unid', s:60,  m:15,  cat:'Otros'},
 };
 
-// ── STORAGE ─────────────────────────────────────────────
+// ── FIREBASE (datos compartidos entre todos los equipos) ──
+var firebaseConfig = {
+  apiKey: "AIzaSyBnx6Ml3bxOHVE64CJYpU9zjPRPTf9F0F4",
+  authDomain: "casa-mojica.firebaseapp.com",
+  projectId: "casa-mojica",
+  storageBucket: "casa-mojica.firebasestorage.app",
+  messagingSenderId: "829321881728",
+  appId: "1:829321881728:web:49f607d437e78ba5559e65"
+};
+firebase.initializeApp(firebaseConfig);
+var db=firebase.firestore();
+var FV=firebase.firestore.FieldValue;
 function lsGet(k,d){try{var v=localStorage.getItem(k);return v?JSON.parse(v):d;}catch(e){return d;}}
 function lsSet(k,v){try{localStorage.setItem(k,JSON.stringify(v));}catch(e){}}
-var pedidos   = lsGet('mj5_ped',[]);
-var inv       = lsGet('mj5_inv', JSON.parse(JSON.stringify(INV0)));
-var historial = lsGet('mj5_hist',[]);
-function guardar(){lsSet('mj5_ped',pedidos);lsSet('mj5_inv',inv);lsSet('mj5_hist',historial);}
+var pedidos   = [];
+var inv       = JSON.parse(JSON.stringify(INV0));
+var historial = [];
+var esEstacion = lsGet('mj_estacion',false);
+function guardar(){} // los datos ahora se guardan en Firebase
 
 // ── UI STATE ─────────────────────────────────────────────
 var vistaActual='mesero', subtab='cuentas', meseroIdx=0, mesaSel=null, carrito=[], catSel='Todos';
@@ -329,6 +347,14 @@ function irSubtab(s){
   renderSubtab();
 }
 function renderizar(){
+  var vistaEl=document.getElementById('v-'+vistaActual),vals={};
+  var foco=document.activeElement&&document.activeElement.id;
+  if(vistaEl)vistaEl.querySelectorAll('input[id],textarea[id]').forEach(function(e){vals[e.id]=e.value;});
+  renderizarVista();
+  Object.keys(vals).forEach(function(id){var e=document.getElementById(id);if(e)e.value=vals[id];});
+  if(foco){var f=document.getElementById(foco);if(f&&f!==document.activeElement)f.focus();}
+}
+function renderizarVista(){
   var nP=pedidos.filter(function(p){return p.estado==='preparando';}).length;
   var b=document.getElementById('badge');
   if(nP>0){b.textContent=nP;b.style.display='inline';}else{b.style.display='none';}
@@ -445,18 +471,22 @@ function enviar(){
   if(!mesaSel||carrito.length===0)return;
   var notaEl=document.getElementById('nota-txt');
   var nota=notaEl?notaEl.value.trim():'';
-  var p={id:'P'+Date.now(),mesa:mesaSel,mesero:MESEROS[meseroIdx],items:JSON.parse(JSON.stringify(carrito)),estado:'preparando',nota:nota,ts:Date.now()};
-  // Descontar inventario con porciones reales
+  var p={id:'P'+Date.now()+Math.random().toString(36).slice(2,6),mesa:mesaSel,mesero:MESEROS[meseroIdx],items:JSON.parse(JSON.stringify(carrito)),estado:'preparando',nota:nota,ts:Date.now()};
+  p=JSON.parse(JSON.stringify(p));
+  // Descontar inventario con porciones reales (en la nube)
+  var dec={};
   p.items.forEach(function(it){
     var d=MENU.find(function(m){return m.id===it.id;});if(!d)return;
-    Object.keys(d.ing).forEach(function(ing){
-      if(inv[ing])inv[ing].s=Math.max(0,parseFloat((inv[ing].s-d.ing[ing]*it.qty).toFixed(3)));
-    });
+    Object.keys(d.ing).forEach(function(ing){dec[ing]=(dec[ing]||0)+d.ing[ing]*it.qty;});
   });
-  pedidos.push(p);guardar();
-  imprimirTickets(p);
+  var batch=db.batch();
+  batch.set(db.collection('pedidos').doc(p.id),p);
+  var upd={};Object.keys(dec).forEach(function(k){upd[k]={s:FV.increment(-dec[k])};});
+  if(Object.keys(upd).length)batch.set(db.collection('inventario').doc('stock'),upd,{merge:true});
+  batch.set(db.collection('impresiones').doc(),{tipo:'pedido',pedido:p,ts:Date.now(),impreso:false});
+  batch.commit().catch(function(e){console.error(e);toast('⚠ No se pudo enviar. Revisa el internet');});
   carrito=[];
-  toast('Pedido mesa '+mesaSel+' enviado ✓');renderMesero();
+  toast('Pedido mesa '+mesaSel+' enviado ✓ · imprimiendo');renderMesero();
 }
 
 // ── MODAL ALMUERZO ───────────────────────────────────────
@@ -581,10 +611,10 @@ function confirmarAlmuerzo(){
 }
 
 // ── IMPRESIÓN ─────────────────────────────────────────────
-function imprimirTickets(p){
+function htmlTickets(p){
   var total=p.items.reduce(function(s,it){var d=MENU.find(function(m){return m.id===it.id;});return s+(precioItem(it)*it.qty);},0);
-  var hora=new Date().toLocaleTimeString('es-CO',{hour:'2-digit',minute:'2-digit'});
-  var fecha=new Date().toLocaleDateString('es-CO',{day:'2-digit',month:'2-digit',year:'numeric'});
+  var hora=new Date(p.ts).toLocaleTimeString('es-CO',{hour:'2-digit',minute:'2-digit'});
+  var fecha=new Date(p.ts).toLocaleDateString('es-CO',{day:'2-digit',month:'2-digit',year:'numeric'});
   var lineasC='',lineasCli='';
   p.items.forEach(function(it){
     lineasC+='<div class="pi-item"><span class="pi-qty">'+it.qty+'x</span><span>'+it.n+'</span></div>';
@@ -595,7 +625,7 @@ function imprimirTickets(p){
     var d=MENU.find(function(m){return m.id===it.id;});
     lineasCli+='<div class="pi-item"><span class="pi-qty">'+it.qty+'x</span><span class="pi-nombre">'+it.n+'</span><span class="pi-precio">$'+fmt(precioItem(it)*it.qty)+'</span></div>';
   });
-  mostrarOverlay(
+  return (
     '<div class="pi-ticket pi-cocina"><div class="pi-titulo">★ COCINA ★</div>'
     +'<div class="pi-mesa">Mesa '+p.mesa+'</div>'
     +'<div class="pi-info">Mesero: '+p.mesero+'</div>'
@@ -609,12 +639,12 @@ function imprimirTickets(p){
     +'<div class="pi-sep"></div>'+lineasCli
     +'<div class="pi-total"><span>TOTAL</span><span>$'+fmt(total)+'</span></div>'
     +'<div class="pi-sep"></div><div class="pi-pie">¡Gracias por su visita!</div>'
-    +'<div class="pi-pie">Vuelva pronto 🍽</div></div>',
-    'Tickets mesa '+p.mesa
+    +'<div class="pi-pie">Vuelva pronto 🍽</div></div>'
   );
 }
-function imprimirCuenta(mesa){
+function htmlCuenta(mesa){
   var peds=pedidos.filter(function(p){return p.mesa===mesa;});
+  if(peds.length===0)return null;
   var total=peds.reduce(function(s,p){return s+p.items.reduce(function(s2,it){var d=MENU.find(function(m){return m.id===it.id;});return s2+(precioItem(it)*it.qty);},0);},0);
   var hora=new Date().toLocaleTimeString('es-CO',{hour:'2-digit',minute:'2-digit'});
   var fecha=new Date().toLocaleDateString('es-CO',{day:'2-digit',month:'2-digit',year:'numeric'});
@@ -623,7 +653,7 @@ function imprimirCuenta(mesa){
   items.forEach(function(it){var d=MENU.find(function(m){return m.id===it.id;});
     lineas+='<div class="pi-item"><span class="pi-qty">'+it.qty+'x</span><span class="pi-nombre">'+it.n+'</span><span class="pi-precio">$'+fmt(precioItem(it)*it.qty)+'</span></div>';
   });
-  mostrarOverlay(
+  return (
     '<div class="pi-ticket pi-cliente"><div class="pi-titulo">Casa Mojica</div>'
     +'<div class="pi-sub">Restaurante & Panadería</div>'
     +'<div class="pi-sep"></div>'
@@ -632,9 +662,56 @@ function imprimirCuenta(mesa){
     +'<div class="pi-sep"></div>'+lineas
     +'<div class="pi-total"><span>TOTAL</span><span>$'+fmt(total)+'</span></div>'
     +'<div class="pi-sep"></div><div class="pi-pie">¡Gracias por su visita!</div>'
-    +'<div class="pi-pie">Vuelva pronto 🍽</div></div>',
-    'Cuenta mesa '+mesa
+    +'<div class="pi-pie">Vuelva pronto 🍽</div></div>'
   );
+}
+// ── ESTACIÓN DE IMPRESIÓN ────────────────────────────────
+// Un solo equipo (el que tiene la impresora) imprime todo lo que envían los celulares.
+var unsubImp=null,colaImp=[],imprimiendo=false,vistosImp={};
+function activarEstacion(on){
+  esEstacion=!!on;lsSet('mj_estacion',esEstacion);
+  if(unsubImp){unsubImp();unsubImp=null;}
+  colaImp=[];vistosImp={};
+  if(esEstacion){
+    unsubImp=db.collection('impresiones').where('impreso','==',false).onSnapshot(function(snap){
+      snap.docs.forEach(function(d){if(!vistosImp[d.id]){vistosImp[d.id]=true;colaImp.push({id:d.id,data:d.data()});}});
+      colaImp.sort(function(a,b){return a.data.ts-b.data.ts;});
+      procesarCola();
+    },function(e){console.error(e);toast('⚠ Error en la estación de impresión');});
+  }
+  renderizar();
+}
+function procesarCola(){
+  if(imprimiendo||colaImp.length===0)return;
+  imprimiendo=true;
+  var job=colaImp.shift();
+  var ref=db.collection('impresiones').doc(job.id);
+  db.runTransaction(function(t){
+    return t.get(ref).then(function(doc){
+      if(!doc.exists)return false;      // ya lo imprimió otro equipo
+      t.delete(ref);return true;
+    });
+  }).then(function(ok){
+    if(!ok)return;
+    if(Date.now()-job.data.ts>3*3600000)return; // trabajos muy viejos no se imprimen
+    var html=job.data.tipo==='pedido'?htmlTickets(job.data.pedido):htmlCuenta(job.data.mesa);
+    if(html)imprimirDirecto(html);
+  }).catch(function(e){console.error(e);delete vistosImp[job.id];})
+  .then(function(){imprimiendo=false;procesarCola();});
+}
+function imprimirDirecto(html){
+  var o=document.getElementById('print-overlay');if(o)o.remove();
+  var div=document.createElement('div');
+  div.id='print-overlay';div.className='solo-impresion';
+  div.innerHTML='<div><div id="tickets-para-imprimir">'+html+'</div></div>';
+  document.body.appendChild(div);
+  window.print();
+  div.remove();
+}
+function pedirCuenta(mesa){
+  db.collection('impresiones').add({tipo:'cuenta',mesa:mesa,ts:Date.now(),impreso:false})
+    .then(function(){toast('Cuenta mesa '+mesa+' enviada a imprimir');})
+    .catch(function(){toast('⚠ No se pudo enviar a imprimir');});
 }
 function mostrarOverlay(contenido,titulo){
   var o=document.getElementById('print-overlay');if(o)o.remove();
@@ -684,7 +761,10 @@ function renderCaja(){
   var totalHoy=historial.reduce(function(s,p){return s+p.total;},0);
   var mesasAct={};pedidos.forEach(function(p){mesasAct[p.mesa]=true;});
   var bajos=Object.values(inv).filter(function(v){return v.s<=v.m;}).length;
-  el.innerHTML='<div class="mets">'
+  var estBar=esEstacion
+    ?'<div class="est-bar on"><span>🖨 Este equipo es la estación de impresión</span><button onclick="activarEstacion(false)">Desactivar</button></div>'
+    :'<div class="est-bar"><span>Este equipo no imprime.</span><button onclick="activarEstacion(true)">Usar como estación de impresión</button></div>';
+  el.innerHTML=estBar+'<div class="mets">'
     +metH('Cuentas cerradas',historial.length,false)
     +metH('Total facturado','$'+fmt(totalHoy),false)
     +metH('Mesas activas',Object.keys(mesasAct).length,false)
@@ -718,7 +798,7 @@ function renderCuentasHTML(){
       +'<div class="ccard-pl">'+platosList.join(', ')+'</div>'
       +'<div class="ccard-f"><span class="ccard-tot">$'+fmt(total)+'</span>'
       +'<div style="display:flex;gap:6px">'
-      +'<button class="btn-cer" style="background:#F5F3F0;color:#1A1714;border:1px solid #DDD" onclick="imprimirCuenta('+mesa+')" title="Reimprimir cuenta">🖨</button>'
+      +'<button class="btn-cer" style="background:#F5F3F0;color:#1A1714;border:1px solid #DDD" onclick="pedirCuenta('+mesa+')" title="Reimprimir cuenta">🖨</button>'
       +'<button class="btn-cer" onclick="cerrar('+mesa+')">Cobrado ✓</button>'
       +'</div></div></div>';
   });
@@ -728,9 +808,12 @@ function cerrar(mesa){
   var peds=pedidos.filter(function(p){return p.mesa===mesa;});
   var total=peds.reduce(function(s,p){return s+p.items.reduce(function(s2,it){var d=MENU.find(function(m){return m.id===it.id;});return s2+(precioItem(it)*it.qty);},0);},0);
   var items=[];peds.forEach(function(p){p.items.forEach(function(i){items.push(i);});});
-  historial.push({id:peds[0].id,mesa:mesa,mesero:peds[0].mesero,items:items,total:total,ts:Date.now()});
-  pedidos=pedidos.filter(function(p){return p.mesa!==mesa;});
-  guardar();toast('Cuenta mesa '+mesa+' cerrada · $'+fmt(total));renderizar();
+  var reg=JSON.parse(JSON.stringify({id:peds[0].id,mesa:mesa,mesero:peds[0].mesero,items:items,total:total,ts:Date.now()}));
+  var batch=db.batch();
+  batch.set(db.collection('historial').doc(reg.id+'_'+reg.ts),reg);
+  peds.forEach(function(p){batch.delete(db.collection('pedidos').doc(p.id));});
+  batch.commit().catch(function(e){console.error(e);toast('⚠ No se pudo cerrar la cuenta. Revisa el internet');});
+  toast('Cuenta mesa '+mesa+' cerrada · $'+fmt(total));
 }
 
 // ── INVENTARIO (con entrada manual de cantidades) ─────────
@@ -763,11 +846,11 @@ function agregarStock(id){
   var cantidad=parseFloat(el.value);
   if(!cantidad||cantidad<=0){toast('Ingresa una cantidad válida');return;}
   if(inv[id]){
-    inv[id].s=parseFloat((inv[id].s+cantidad).toFixed(3));
-    guardar();
+    var upd={};upd[id]={s:FV.increment(cantidad)};
+    db.collection('inventario').doc('stock').set(upd,{merge:true})
+      .catch(function(){toast('⚠ No se pudo guardar. Revisa el internet');});
+    el.value='';
     toast(inv[id].n+': +'+cantidad+' '+inv[id].u+' agregados');
-    renderSubtab();
-    renderMetrics();
   }
 }
 function renderMetrics(){
@@ -797,7 +880,7 @@ function renderRepHTML(){
   historial.slice(-10).reverse().forEach(function(p){
     html+='<div class="hrow"><div><div>Mesa '+p.mesa+' · '+p.mesero+'</div><div class="hmeta">'+p.items.length+' plato'+(p.items.length!==1?'s':'')+'</div></div><strong>$'+fmt(p.total)+'</strong></div>';
   });
-  html+='</div><div style="text-align:center;margin-top:16px"><button onclick="resetDemo()" style="font-size:12px;color:#CCC;background:none;border:none;cursor:pointer">Reiniciar datos de demo</button></div>';
+  html+='</div>';
   return html;
 }
 
@@ -807,13 +890,36 @@ var toastT;
 function toast(msg){var el=document.getElementById('toast');el.textContent=msg;el.classList.add('show');clearTimeout(toastT);toastT=setTimeout(function(){el.classList.remove('show');},3000);}
 function resetDemo(){if(!confirm('¿Reiniciar todos los datos?'))return;pedidos=[];inv=JSON.parse(JSON.stringify(INV0));historial=[];guardar();renderizar();toast('Datos reiniciados');}
 
-setInterval(function(){
-  var np=lsGet('mj5_ped',null),ni=lsGet('mj5_inv',null),nh=lsGet('mj5_hist',null);
-  if(!np||!ni||!nh)return;
-  if(JSON.stringify(np)!==JSON.stringify(pedidos)||JSON.stringify(ni)!==JSON.stringify(inv)||JSON.stringify(nh)!==JSON.stringify(historial)){
-    pedidos=np;inv=ni;historial=nh;renderizar();
+// ── SINCRONIZACIÓN EN TIEMPO REAL ─────────────────────────
+function inicioDia(){var d=new Date();d.setHours(0,0,0,0);return d.getTime();}
+var diaActual=inicioDia(),unsubHist=null;
+db.collection('pedidos').onSnapshot(function(snap){
+  pedidos=snap.docs.map(function(d){return d.data();});
+  renderizar();
+},function(e){console.error(e);toast('⚠ Sin conexión con la base de datos');});
+function escucharHistorial(){
+  if(unsubHist)unsubHist();
+  unsubHist=db.collection('historial').where('ts','>=',diaActual).onSnapshot(function(snap){
+    historial=snap.docs.map(function(d){return d.data();}).sort(function(a,b){return a.ts-b.ts;});
+    renderizar();
+  },function(e){console.error(e);});
+}
+escucharHistorial();
+db.collection('inventario').doc('stock').onSnapshot(function(doc){
+  if(!doc.exists){
+    if(!doc.metadata.fromCache)db.collection('inventario').doc('stock').set(JSON.parse(JSON.stringify(INV0)));
+    return;
   }
-},2500);
+  var data=doc.data();
+  inv=JSON.parse(JSON.stringify(INV0));
+  Object.keys(data).forEach(function(k){if(inv[k]&&data[k]&&typeof data[k].s==='number')inv[k].s=Math.max(0,parseFloat(data[k].s.toFixed(3)));});
+  renderizar();
+},function(e){console.error(e);});
+setInterval(function(){
+  if(inicioDia()!==diaActual){diaActual=inicioDia();escucharHistorial();}
+  if(vistaActual==='cocina')renderCocina();
+},30000);
+if(esEstacion)activarEstacion(true);
 renderizar();
 </script>
 </body>
