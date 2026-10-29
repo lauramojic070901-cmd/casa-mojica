@@ -882,6 +882,7 @@ function renderInvHTML(){
   var cats=['Carnes','Verduras','Otros'];
   var html='<div class="inv-acc">'
     +'<button class="btn-inv-big" onclick="abrirVentasManual()">🧾 Registrar platos vendidos (comandas en papel)</button>'
+    +'<button class="btn-inv-big" style="background:#fff;color:#7A1A1A;border:2px solid #7A1A1A;margin-top:8px" onclick="abrirNuevoInsumo()">+ Agregar insumo nuevo</button>'
     +'<div class="inv-ayuda">En cada insumo escribe la cantidad y toca <b>+ Entrada</b> (mercado que llega) o <b>− Salida</b> (lo que se gastó). Toca la unidad para cambiarla entre kg, unidades o litros.</div></div>';
   cats.forEach(function(cat){
     var filas=Object.keys(inv).filter(function(id){return inv[id].cat===cat;})
@@ -918,6 +919,45 @@ function moverStock(id,signo){
   el.value='';
   toast(inv[id].n+': '+(signo>0?'+':'−')+cantidad+' '+UNIDADES[inv[id].u]+(signo>0?' ingresados':' descontados'));
 }
+function baseU(k){return INV0[k]?INV0[k].u:(inv[k]&&inv[k].ub)||'kg';}
+var nuevoIns=null;
+function abrirNuevoInsumo(){nuevoIns={n:'',cat:'Carnes',u:'kg'};pintarNuevoInsumo();document.getElementById('modal-almuerzo').style.display='flex';}
+function pintarNuevoInsumo(){
+  var h='<div class="modal-titulo">Nuevo insumo</div>'
+    +'<div class="modal-sec"><div class="modal-sec-label">Nombre</div><input class="op-input" id="ni-n" value="'+nuevoIns.n.replace(/"/g,'&quot;')+'" oninput="nuevoIns.n=this.value" placeholder="Ej: Lengua, Pimentón, Crema de leche"></div>'
+    +'<div class="modal-sec"><div class="modal-sec-label">Categoría</div><div class="opciones">'
+    +['Carnes','Verduras','Otros'].map(function(c){return '<button class="op-btn'+(nuevoIns.cat===c?' on':'')+'" onclick="nuevoIns.cat=\''+c+'\';pintarNuevoInsumo()">'+c+'</button>';}).join('')+'</div></div>'
+    +'<div class="modal-sec"><div class="modal-sec-label">Unidad</div><div class="opciones">'
+    +Object.keys(UNIDADES).map(function(k){return '<button class="op-btn'+(nuevoIns.u===k?' on':'')+'" onclick="nuevoIns.u=\''+k+'\';pintarNuevoInsumo()">'+UNIDADES[k]+'</button>';}).join('')+'</div></div>'
+    +'<div class="modal-sec"><div class="modal-sec-label">Stock inicial (en '+UNIDADES[nuevoIns.u]+')</div><input class="op-input" id="ni-s" type="number" min="0" step="0.1" placeholder="0"></div>'
+    +'<div class="modal-sec"><div class="modal-sec-label">Mínimo para alerta (en '+UNIDADES[nuevoIns.u]+')</div><input class="op-input" id="ni-m" type="number" min="0" step="0.1" placeholder="0"></div>'
+    +'<div class="modal-footer"><button class="btn-cancel" onclick="cerrarModal()">Cancelar</button><button class="btn-confirm" onclick="guardarNuevoInsumo()">Crear insumo</button></div>';
+  var sv=document.getElementById('ni-s'),mv=document.getElementById('ni-m');var a=sv?sv.value:'',b=mv?mv.value:'';
+  document.getElementById('modal-contenido').innerHTML=h;
+  document.getElementById('ni-s').value=a;document.getElementById('ni-m').value=b;
+}
+function guardarNuevoInsumo(){
+  var n=(nuevoIns.n||'').trim();
+  if(!n){toast('Escribe el nombre del insumo');return;}
+  var existe=Object.keys(inv).some(function(k){return inv[k].n.toLowerCase()===n.toLowerCase();});
+  if(existe){toast('Ya existe un insumo con ese nombre');return;}
+  var st=parseFloat(String(document.getElementById('ni-s').value).replace(',','.'))||0;
+  var mn=parseFloat(String(document.getElementById('ni-m').value).replace(',','.'))||0;
+  var id='x_'+n.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[^a-z0-9]+/g,'_').slice(0,20)+'_'+Date.now().toString(36);
+  var upd={};upd[id]={n:n,cat:nuevoIns.cat,u:nuevoIns.u,ub:nuevoIns.u,s:st,m:mn,eq:1,nuevo:true};
+  var batch=db.batch();
+  batch.set(db.collection('inventario').doc('stock'),upd,{merge:true});
+  batch.set(refMov(),{tipo:'mov',clase:'ajuste',ts:Date.now(),items:[{k:id,n:n,cant:st,u:nuevoIns.u}]});
+  batch.commit().then(function(){toast(n+' agregado al inventario ✓');}).catch(function(){toast('⚠ No se pudo guardar. Revisa el internet');});
+  cerrarModal();
+}
+function eliminarInsumo(id){
+  if(!inv[id]||!inv[id].nuevo)return;
+  if(!confirm('¿Eliminar '+inv[id].n+' del inventario?'))return;
+  var upd={};upd[id]=firebase.firestore.FieldValue.delete();
+  db.collection('inventario').doc('stock').update(upd).then(function(){toast('Insumo eliminado');}).catch(function(){toast('⚠ No se pudo eliminar');});
+  cerrarModal();
+}
 function refMov(){return db.collection('inventario').doc('mov_'+Date.now()+'_'+Math.random().toString(36).slice(2,6));}
 // ── Cambiar unidad de un insumo ──
 var unidSel=null;
@@ -928,7 +968,7 @@ function abrirUnidad(id){
   document.getElementById('modal-almuerzo').style.display='flex';
 }
 function pintarUnidad(){
-  var id=unidSel.id,v=inv[id],base=INV0[id].u,u=unidSel.u;
+  var id=unidSel.id,v=inv[id],base=baseU(id),u=unidSel.u;
   // valores sugeridos convertidos desde la unidad actual
   var eqNueva=(u===v.u)?(v.eq||1):(u===base?1:(unidSel.eq||''));
   var html='<div class="modal-titulo">'+v.n+'</div>'
@@ -944,12 +984,13 @@ function pintarUnidad(){
     +'<input class="op-input" id="u-stock" type="number" step="0.1" min="0" value="'+(u===v.u?fmtCant(v.s,u):'')+'" placeholder="Cuánto hay ahora"></div>'
     +'<div class="modal-sec"><div class="modal-sec-label">Mínimo para alerta (en '+UNIDADES[u]+')</div>'
     +'<input class="op-input" id="u-min" type="number" step="0.1" min="0" value="'+(u===v.u?fmtCant(v.m,u):'')+'"></div>'
+    +(v.nuevo?'<div style="text-align:center;margin:6px 0 10px"><button class="btn-unid" style="color:#C13030" onclick="eliminarInsumo(\''+id+'\')">Eliminar este insumo</button></div>':'')
     +'<div class="modal-footer"><button class="btn-cancel" onclick="cerrarModal()">Cancelar</button>'
     +'<button class="btn-confirm" onclick="guardarUnidad()">Guardar</button></div>';
   document.getElementById('modal-contenido').innerHTML=html;
 }
 function guardarUnidad(){
-  var id=unidSel.id,u=unidSel.u,base=INV0[id].u;
+  var id=unidSel.id,u=unidSel.u,base=baseU(id);
   var eq=1;
   if(u!==base){eq=parseFloat(String(document.getElementById('u-eq').value).replace(',','.'));if(!eq||eq<=0){toast('Escribe la equivalencia');return;}}
   var st=parseFloat(String(document.getElementById('u-stock').value).replace(',','.'));
@@ -1209,11 +1250,15 @@ db.collection('inventario').doc('stock').onSnapshot(function(doc){
   var data=doc.data();
   inv=JSON.parse(JSON.stringify(INV0));
   Object.keys(data).forEach(function(k){
-    if(!inv[k]||!data[k])return;
+    if(!data[k])return;
+    if(!inv[k]){ // insumo nuevo creado desde Caja
+      if(!data[k].nuevo||!data[k].n)return;
+      inv[k]={n:data[k].n,u:data[k].ub||'kg',ub:data[k].ub||'kg',s:0,m:0,cat:data[k].cat||'Otros',nuevo:true};
+    }
     if(typeof data[k].s==='number')inv[k].s=Math.max(0,parseFloat(data[k].s.toFixed(3)));
     if(data[k].u&&UNIDADES[data[k].u])inv[k].u=data[k].u;
     if(typeof data[k].eq==='number'&&data[k].eq>0)inv[k].eq=data[k].eq;
-    if(inv[k].u===INV0[k].u)inv[k].eq=1; // en su unidad original no hay conversión
+    if(inv[k].u===baseU(k))inv[k].eq=1; // en su unidad original no hay conversión
     if(typeof data[k].m==='number')inv[k].m=data[k].m;
   });
   renderizar();
